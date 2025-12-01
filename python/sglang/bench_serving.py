@@ -749,6 +749,95 @@ def get_processor(
         pretrained_model_name_or_path, trust_remote_code=True
     )
 
+######################Modify#######################
+def sample_longbench(
+    dataset_path,
+    num_requests,
+    tokenizer,
+    fixed_output_len=None,
+    longbench_min_context=None,
+    prompt_suffix="",
+    apply_chat_template=False,
+):
+    if not dataset_path:
+        raise ValueError("The latest version of the \"datasets\" library no longer supports loading LongBench.")
+    dataset_names = []
+    dataset = []
+    targets = ["qasper", "narrativeqa", "multifieldqa_en", "multifieldqa_zh", "dureader", \
+               "gov_report", "qmsum", "multi_news", "vcsum",\
+                "lcc", "repobench-p"]
+    for file in os.listdir(dataset_path):
+        if not file.endswith(".jsonl"):
+            continue
+        name = file[:-6] 
+        if not name in targets:
+            continue
+        
+        file_path = os.path.join(dataset_path, file)
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = [json.loads(line) for line in f if line.strip()]
+            dataset_names.append(name)
+            dataset = dataset+lines
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Warning: Failed to read {file_path}: {e}")
+    random.shuffle(dataset)
+
+    # Filter out sequences that are too long or too short
+    filtered_dataset: List[DatasetRow] = []
+    for i in range(len(dataset)):
+        if len(filtered_dataset) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        context = dataset[i]["context"]
+        question = dataset[i]["input"]
+        prompt = context+"\n"+question
+     
+        if prompt_suffix:
+            prompt = (
+                remove_suffix(prompt, ASSISTANT_SUFFIX)
+                + prompt_suffix
+                + ASSISTANT_SUFFIX
+            )
+
+        if apply_chat_template:
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+                return_dict=False,
+            )
+            if tokenizer.bos_token:
+                prompt = prompt.replace(tokenizer.bos_token, "")
+
+        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_len = len(prompt_token_ids)
+        output_len = (
+            fixed_output_len if fixed_output_len is not None else 256
+        )
+
+        # if prompt_len < 2 or output_len < 2:
+        #     # Prune too short sequences.
+        #     continue
+
+        context_len = prompt_len + output_len
+        if longbench_min_context and context_len < longbench_min_context:
+            # Prune too long sequences.
+            continue
+
+        filtered_dataset.append(
+            DatasetRow(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                output_len=output_len,
+            )
+        )
+       
+    print(f"#Input tokens: {np.sum([x.prompt_len for x in filtered_dataset])}")
+    print(f"#Output tokens: {np.sum([x.output_len for x in filtered_dataset])}")
+    return filtered_dataset
+#########################################################################################3
 
 def get_dataset(args, tokenizer, model_id=None):
     tokenize_prompt = getattr(args, "tokenize_prompt", False)
@@ -826,6 +915,19 @@ def get_dataset(args, tokenizer, model_id=None):
 
         # Limit the number of requests based on --num-prompts
         input_requests = all_requests_data[: args.num_prompts]
+    ####################Modify###################
+    elif args.dataset_name == "longbench":
+        output_len = args.sharegpt_output_len
+        input_requests = sample_longbench(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            fixed_output_len=output_len,
+            longbench_min_context=args.longbench_min_context,
+            prompt_suffix=args.prompt_suffix,
+            apply_chat_template=args.apply_chat_template,
+        )
+    ###############################################
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
     return input_requests
@@ -2538,6 +2640,7 @@ if __name__ == "__main__":
         type=int,
         help="If not set, the default port is configured according to its default value for different LLM Inference Engines.",
     )
+    ###############Modify###################
     parser.add_argument(
         "--dataset-name",
         type=str,
@@ -2550,9 +2653,11 @@ if __name__ == "__main__":
             "mmmu",
             "image",
             "mooncake",
+            "longbench",
         ],
         help="Name of the dataset to benchmark on.",
     )
+    ########################################
     parser.add_argument(
         "--dataset-path", type=str, default="", help="Path to the dataset."
     )
@@ -2583,6 +2688,14 @@ if __name__ == "__main__":
         default=None,
         help="Output length for each request. Overrides the output length from the ShareGPT dataset.",
     )
+    ##########Modify############
+    parser.add_argument(
+        "--longbench-min-context",
+        type=int,
+        default=None,
+        help="The minimum context length of the model for the Longbench dataset. Requests shorter than the context length will be dropped.",
+    )
+    ############################
     parser.add_argument(
         "--sharegpt-context-len",
         type=int,
