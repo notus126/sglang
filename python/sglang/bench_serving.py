@@ -837,6 +837,217 @@ def sample_longbench(
     print(f"#Input tokens: {np.sum([x.prompt_len for x in filtered_dataset])}")
     print(f"#Output tokens: {np.sum([x.output_len for x in filtered_dataset])}")
     return filtered_dataset
+
+# Sample long requests from LongBench and short requests from ShareGPT
+# The long and short requests are designed to arrive alternately
+def sample_mixed_requests(
+    dataset_path,
+    num_requests,
+    tokenizer,
+    fixed_output_len=None,
+    long_request_min_context=8000,
+    long_request_max_context=32000,
+    short_request_max_context=1000,
+    long_request_count=2,
+    short_request_count=6,
+    prompt_suffix="",
+    apply_chat_template=False,
+):
+    # 1. Load LongBench dataset
+    # Long requests are from LongBench dataset
+    if not dataset_path:
+        raise ValueError("The latest version of the \"datasets\" library no longer supports loading LongBench.")
+    dataset_names = []
+    dataset = []
+    targets = ["qasper", "narrativeqa", "multifieldqa_en", "multifieldqa_zh", "dureader", \
+               "gov_report", "qmsum", "multi_news", "vcsum",\
+                "lcc", "repobench-p"]
+    for file in os.listdir(dataset_path):
+        if not file.endswith(".jsonl"):
+            continue
+        name = file[:-6] 
+        if not name in targets:
+            continue
+        
+        file_path = os.path.join(dataset_path, file)
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = [json.loads(line) for line in f if line.strip()]
+            dataset_names.append(name)
+            dataset = dataset+lines
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Warning: Failed to read {file_path}: {e}")
+    random.shuffle(dataset)
+
+    long_request_dataset: List[DatasetRow] = []
+    for i in range(len(dataset)):
+        if len(long_request_dataset) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        context = dataset[i]["context"]
+        question = dataset[i]["input"]
+        prompt = context+"\n"+question
+     
+        if prompt_suffix:
+            prompt = (
+                remove_suffix(prompt, ASSISTANT_SUFFIX)
+                + prompt_suffix
+                + ASSISTANT_SUFFIX
+            )
+
+        if apply_chat_template:
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+                return_dict=False,
+            )
+            if tokenizer.bos_token:
+                prompt = prompt.replace(tokenizer.bos_token, "")
+
+        prompt_token_ids = tokenizer.encode(prompt)
+
+        prompt_len = len(prompt_token_ids)
+        output_len = (
+            fixed_output_len if fixed_output_len is not None else 256
+        )
+        context_len = prompt_len + output_len
+
+        if context_len < long_request_min_context or context_len > long_request_max_context:
+            continue
+
+        if prompt_len < 2 or output_len < 2:
+            continue
+       
+        long_request_dataset.append(
+            DatasetRow(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                output_len=output_len,
+            )
+        )
+    
+    # 2. Load ShareGPT dataset
+    # Short requests are from ShareGPT dataset
+    def sample_short_requests(
+        tokenizer: PreTrainedTokenizerBase,
+        fixed_output_len: Optional[int] = None,
+        short_request_max_context: Optional[int] = None,
+        prompt_suffix: Optional[str] = "",
+        apply_chat_template=False,
+    ) -> List[DatasetRow]:
+        # Download sharegpt if necessary
+        dataset_path = ""
+        if not is_file_valid_json(dataset_path) and dataset_path == "":
+            dataset_path = download_and_cache_file(SHAREGPT_URL)
+
+        # Load the dataset.
+        with open(dataset_path) as f:
+            dataset = json.load(f)
+
+        # Filter out the conversations with less than 2 turns.
+        dataset = [
+            data
+            for data in dataset
+            if len(data.get("conversations", data.get("conversation", []))) >= 2
+        ]
+        # Only keep the first two turns of each conversation.
+        dataset = [
+            (
+                data.get("conversations", data.get("conversation", []))[0]["value"],
+                data.get("conversations", data.get("conversation", []))[1]["value"],
+            )
+            for data in dataset
+        ]
+
+        # Shuffle the dataset.
+        random.shuffle(dataset)
+
+        # Filter out sequences that are too long or too short
+        filtered_dataset: List[DatasetRow] = []
+        for i in range(len(dataset)):
+            if len(filtered_dataset) == num_requests:
+                break
+
+            # Tokenize the prompts and completions.
+            prompt = dataset[i][0]
+            if prompt_suffix:
+                prompt = (
+                    remove_suffix(prompt, ASSISTANT_SUFFIX)
+                    + prompt_suffix
+                    + ASSISTANT_SUFFIX
+                )
+
+            if apply_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    return_dict=False,
+                )
+                if tokenizer.bos_token:
+                    prompt = prompt.replace(tokenizer.bos_token, "")
+
+            prompt_token_ids = tokenizer.encode(prompt)
+            completion = dataset[i][1]
+            completion_token_ids = tokenizer.encode(completion)
+
+            prompt_len = len(prompt_token_ids)
+            output_len = (
+                len(completion_token_ids) if fixed_output_len is None else fixed_output_len
+            )
+            context_len = prompt_len + output_len
+
+            if prompt_len < 2 or output_len < 2:
+                continue
+
+            if short_request_max_context and context_len > short_request_max_context:
+                # Prune too long sequences.
+                continue
+
+            filtered_dataset.append(
+                DatasetRow(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    output_len=output_len,
+                )
+            )
+
+        return filtered_dataset
+
+    short_request_dataset = sample_short_requests(
+        tokenizer,
+        fixed_output_len,
+        short_request_max_context,
+        prompt_suffix,
+        apply_chat_template,
+    )
+    
+    # 3. Mix the long requests and short requests alternately
+    idx1 = idx2 = 0
+    filtered_dataset: List[DatasetRow] = []
+    dataset_size = 0
+    idx = 0
+    round = long_request_count+short_request_count
+    while dataset_size<num_requests:
+        if idx<long_request_count:
+            filtered_dataset.append(long_request_dataset[idx1])
+            idx1+=1
+            if idx1>len(long_request_dataset): idx1=0
+            # print("long", end="")
+        else:
+            filtered_dataset.append(short_request_dataset[idx2])
+            idx2+=1
+            if idx2>len(short_request_dataset): idx2=0
+            # print("short", end="")
+        # if idx!=round-1: print("-", end="")
+        # else: print("")
+        idx = (idx+1)%round
+        dataset_size+=1
+    # print("")
+   
+    return filtered_dataset
 #########################################################################################3
 
 def get_dataset(args, tokenizer, model_id=None):
@@ -924,6 +1135,22 @@ def get_dataset(args, tokenizer, model_id=None):
             tokenizer=tokenizer,
             fixed_output_len=output_len,
             longbench_min_context=args.longbench_min_context,
+            prompt_suffix=args.prompt_suffix,
+            apply_chat_template=args.apply_chat_template,
+        )
+    elif args.dataset_name == "mix-len":
+        output_len = args.sharegpt_output_len
+        input_requests = sample_mixed_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            fixed_output_len=output_len,
+            long_request_min_context=args.long_request_min_context,
+            long_request_max_context=args.long_request_max_context,
+            short_request_max_context=args.short_request_max_context,
+            long_request_count=args.long_request_count,
+            short_request_count=args.short_request_count,
+            # longbench_min_context=args.longbench_min_context,
             prompt_suffix=args.prompt_suffix,
             apply_chat_template=args.apply_chat_template,
         )
@@ -1235,6 +1462,14 @@ def sample_sharegpt_requests(
 ) -> List[DatasetRow]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
+
+    # print(dataset_path)
+    # print("*****************")
+    # print(num_requests)
+    # print("*****************")
+    # print(fixed_output_len)
+    # print("*****************")
+    # print(context_len)
 
     # Download sharegpt if necessary
     if not is_file_valid_json(dataset_path) and dataset_path == "":
@@ -2654,6 +2889,7 @@ if __name__ == "__main__":
             "image",
             "mooncake",
             "longbench",
+            "mix-len",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -2689,12 +2925,45 @@ if __name__ == "__main__":
         help="Output length for each request. Overrides the output length from the ShareGPT dataset.",
     )
     ##########Modify############
+    # For LongBench dataset
     parser.add_argument(
         "--longbench-min-context",
         type=int,
         default=None,
         help="The minimum context length of the model for the Longbench dataset. Requests shorter than the context length will be dropped.",
     )
+    # For Mixed-len dataset
+    parser.add_argument(
+        "--long_request_min_context",
+        type=int,
+        default=None,
+        help="The minimum context length of the long requests.",
+    )
+    parser.add_argument(
+        "--long_request_max_context",
+        type=int,
+        default=None,
+        help="The maximum context length of the long requests.",
+    )
+    parser.add_argument(
+        "--short_request_max_context",
+        type=int,
+        default=None,
+        help="The maximum context length of the short requests",
+    )
+    parser.add_argument(
+        "--long_request_count",
+        type=int,
+        default=None,
+        help="The number of long requests within a period",
+    )
+    parser.add_argument(
+        "--short_request_count",
+        type=int,
+        default=None,
+        help="The number of short requests within a period",
+    )
+
     ############################
     parser.add_argument(
         "--sharegpt-context-len",
