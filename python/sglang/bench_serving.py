@@ -750,15 +750,71 @@ def get_processor(
     )
 
 ######################Modify#######################
+# Count the number of requests with different lengths in the dataset.
+# Raw dataset
+def range_count(
+    dataset_name,
+    dataset,
+    tokenizer,
+    prompt_suffix,
+    apply_chat_template,
+):
+    statistic = {}
+    for i in tqdm(range(len(dataset))):
+
+        context = dataset[i]["context"]
+        question = dataset[i]["input"]
+        prompt = context+"\n"+question
+     
+        if prompt_suffix:
+            prompt = (
+                remove_suffix(prompt, ASSISTANT_SUFFIX)
+                + prompt_suffix
+                + ASSISTANT_SUFFIX
+            )
+
+        if apply_chat_template:
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+                return_dict=False,
+            )
+            if tokenizer.bos_token:
+                prompt = prompt.replace(tokenizer.bos_token, "")
+
+        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_len = len(prompt_token_ids)
+        p = prompt_len // 2000
+        if p not in statistic:
+            statistic[p] = 1
+        else: 
+            statistic[p] += 1
+
+    sorted_keys = sorted(statistic.keys())
+    new_statistic = {}
+    for key in sorted_keys:
+        # print(f"{key*2}k~{(key+1)*2}k: {statistic[key]}")
+        new_key = f"{key*2}k-{(key+1)*2}k"
+        new_statistic[new_key] = statistic[key]
+    model_name  = "Llama-2-7b-chat-hf"
+    record = {}
+    record[model_name] = new_statistic
+    file_path = f"./{dataset_name}_range_count.json"
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=4)
+
 def sample_longbench(
     dataset_path,
     num_requests,
     tokenizer,
     fixed_output_len=None,
     longbench_min_context=None,
+    longbench_max_context=None,
     prompt_suffix="",
     apply_chat_template=False,
 ):
+
     if not dataset_path:
         raise ValueError("The latest version of the \"datasets\" library no longer supports loading LongBench.")
     dataset_names = []
@@ -785,6 +841,7 @@ def sample_longbench(
 
     # Filter out sequences that are too long or too short
     filtered_dataset: List[DatasetRow] = []
+
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
@@ -817,12 +874,16 @@ def sample_longbench(
             fixed_output_len if fixed_output_len is not None else 256
         )
 
-        # if prompt_len < 2 or output_len < 2:
-        #     # Prune too short sequences.
-        #     continue
+        if prompt_len < 2 or output_len < 2:
+            # Prune too short sequences.
+            continue
 
         context_len = prompt_len + output_len
         if longbench_min_context and context_len < longbench_min_context:
+            # Prune too short sequences.
+            continue
+
+        if longbench_max_context and context_len > longbench_max_context:
             # Prune too long sequences.
             continue
 
@@ -1029,25 +1090,111 @@ def sample_mixed_requests(
     filtered_dataset: List[DatasetRow] = []
     dataset_size = 0
     idx = 0
-    round = long_request_count+short_request_count
-    while dataset_size<num_requests:
-        if idx<long_request_count:
+    round = long_request_count + short_request_count
+    while dataset_size < num_requests:
+        if idx < long_request_count:
             filtered_dataset.append(long_request_dataset[idx1])
-            idx1+=1
-            if idx1>len(long_request_dataset): idx1=0
+            idx1 += 1
+            if idx1 > len(long_request_dataset): idx1=0
             # print("long", end="")
         else:
             filtered_dataset.append(short_request_dataset[idx2])
-            idx2+=1
-            if idx2>len(short_request_dataset): idx2=0
+            idx2 += 1
+            if idx2 > len(short_request_dataset): idx2=0
             # print("short", end="")
         # if idx!=round-1: print("-", end="")
         # else: print("")
-        idx = (idx+1)%round
-        dataset_size+=1
+        idx = (idx + 1) % round
+        dataset_size += 1
     # print("")
    
     return filtered_dataset
+
+def sample_infinitebench(
+    dataset_path,
+    num_requests,
+    tokenizer,
+    fixed_output_len=None,
+    infini_min_context=None,
+    infini_max_context=None,
+    prompt_suffix="",
+    apply_chat_template=False,
+):
+
+    from datasets import Features, Value, Sequence
+    ft = Features({"id": Value("int64"), "context": Value("string"), "input": Value("string"), "answer": Sequence(Value("string")), "options": Sequence(Value("string"))})
+    if dataset_path:
+        dataset = load_dataset(dataset_path, features=ft)
+    else:
+        dataset = load_dataset("xinrongzhang2022/InfiniteBench", features=ft)
+    
+    all_dataset = []
+    for name in dataset.keys():
+        sub_dataset = dataset[name]
+        all_dataset += list(sub_dataset)
+    random.shuffle(all_dataset)
+
+    # Filter out sequences that are too long or too short
+    filtered_dataset: List[DatasetRow] = []
+
+    for i in range(len(all_dataset)):
+        if len(filtered_dataset) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        context = all_dataset[i]["context"]
+        question = all_dataset[i]["input"]
+        prompt = context+"\n"+question
+     
+        if prompt_suffix:
+            prompt = (
+                remove_suffix(prompt, ASSISTANT_SUFFIX)
+                + prompt_suffix
+                + ASSISTANT_SUFFIX
+            )
+
+        if apply_chat_template:
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+                return_dict=False,
+            )
+            if tokenizer.bos_token:
+                prompt = prompt.replace(tokenizer.bos_token, "")
+
+        prompt_token_ids = tokenizer.encode(prompt)
+        prompt_len = len(prompt_token_ids)
+        output_len = (
+            fixed_output_len if fixed_output_len is not None else 256
+        )
+
+        if prompt_len < 2 or output_len < 2:
+            # Prune too short sequences.
+            continue
+
+        context_len = prompt_len + output_len
+        if infini_min_context and context_len < infini_min_context:
+            # Prune too short sequences.
+            continue
+
+        if infini_max_context and context_len > infini_max_context:
+            # Prune too long sequences.
+            continue
+
+        filtered_dataset.append(
+            DatasetRow(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                output_len=output_len,
+            )
+        )
+       
+    print(f"#Input tokens: {np.sum([x.prompt_len for x in filtered_dataset])}")
+    print(f"#Output tokens: {np.sum([x.output_len for x in filtered_dataset])}")
+    return filtered_dataset
+    
+    
 #########################################################################################3
 
 def get_dataset(args, tokenizer, model_id=None):
@@ -1135,6 +1282,7 @@ def get_dataset(args, tokenizer, model_id=None):
             tokenizer=tokenizer,
             fixed_output_len=output_len,
             longbench_min_context=args.longbench_min_context,
+            longbench_max_context=args.longbench_max_context,
             prompt_suffix=args.prompt_suffix,
             apply_chat_template=args.apply_chat_template,
         )
@@ -1151,6 +1299,18 @@ def get_dataset(args, tokenizer, model_id=None):
             long_request_count=args.long_request_count,
             short_request_count=args.short_request_count,
             # longbench_min_context=args.longbench_min_context,
+            prompt_suffix=args.prompt_suffix,
+            apply_chat_template=args.apply_chat_template,
+        )
+    elif args.dataset_name == "infinitebench":
+        output_len = args.sharegpt_output_len
+        input_requests = sample_infinitebench(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            fixed_output_len=output_len,
+            infini_min_context=args.infini_min_context,
+            infini_max_context=args.infini_max_context,
             prompt_suffix=args.prompt_suffix,
             apply_chat_template=args.apply_chat_template,
         )
@@ -2890,6 +3050,7 @@ if __name__ == "__main__":
             "mooncake",
             "longbench",
             "mix-len",
+            "infinitebench",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -2932,6 +3093,12 @@ if __name__ == "__main__":
         default=None,
         help="The minimum context length of the model for the Longbench dataset. Requests shorter than the context length will be dropped.",
     )
+    parser.add_argument(
+        "--longbench-max-context",
+        type=int,
+        default=None,
+        help="The maximum context length of the model for the Longbench dataset. Requests longer than the context length will be dropped.",
+    )
     # For Mixed-len dataset
     parser.add_argument(
         "--long_request_min_context",
@@ -2962,6 +3129,19 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="The number of short requests within a period",
+    )
+    # For InfiniteBench dataset
+    parser.add_argument(
+        "--infini-min-context",
+        type=int,
+        default=None,
+        help="The minimum context length of the model for the InfiniteBench dataset. Requests shorter than the context length will be dropped.",
+    )
+    parser.add_argument(
+        "--infini-max-context",
+        type=int,
+        default=None,
+        help="The maximum context length of the model for the InfiniteBench dataset. Requests longer than the context length will be dropped.",
     )
 
     ############################
