@@ -811,6 +811,7 @@ def sample_longbench(
     fixed_output_len=None,
     longbench_min_context=None,
     longbench_max_context=None,
+    sort_len=False,
     prompt_suffix="",
     apply_chat_template=False,
 ):
@@ -894,6 +895,10 @@ def sample_longbench(
                 output_len=output_len,
             )
         )
+    
+    # Sort filtered_dataset in ascending order
+    if sort_len:
+        filtered_dataset.sort(key=lambda x: x.prompt_len)
        
     print(f"#Input tokens: {np.sum([x.prompt_len for x in filtered_dataset])}")
     print(f"#Output tokens: {np.sum([x.output_len for x in filtered_dataset])}")
@@ -1117,6 +1122,7 @@ def sample_infinitebench(
     fixed_output_len=None,
     infini_min_context=None,
     infini_max_context=None,
+    sort_len=False,
     prompt_suffix="",
     apply_chat_template=False,
 ):
@@ -1189,7 +1195,11 @@ def sample_infinitebench(
                 output_len=output_len,
             )
         )
-       
+    
+    # Sort filtered_dataset in ascending order
+    if sort_len:
+        filtered_dataset.sort(key=lambda x: x.prompt_len)
+
     print(f"#Input tokens: {np.sum([x.prompt_len for x in filtered_dataset])}")
     print(f"#Output tokens: {np.sum([x.output_len for x in filtered_dataset])}")
     return filtered_dataset
@@ -1283,6 +1293,7 @@ def get_dataset(args, tokenizer, model_id=None):
             fixed_output_len=output_len,
             longbench_min_context=args.longbench_min_context,
             longbench_max_context=args.longbench_max_context,
+            sort_len=args.sort_len,
             prompt_suffix=args.prompt_suffix,
             apply_chat_template=args.apply_chat_template,
         )
@@ -1311,6 +1322,7 @@ def get_dataset(args, tokenizer, model_id=None):
             fixed_output_len=output_len,
             infini_min_context=args.infini_min_context,
             infini_max_context=args.infini_max_context,
+            sort_len=args.sort_len,
             prompt_suffix=args.prompt_suffix,
             apply_chat_template=args.apply_chat_template,
         )
@@ -3086,6 +3098,7 @@ if __name__ == "__main__":
         help="Output length for each request. Overrides the output length from the ShareGPT dataset.",
     )
     ##########Modify############
+    
     # For LongBench dataset
     parser.add_argument(
         "--longbench-min-context",
@@ -3099,6 +3112,7 @@ if __name__ == "__main__":
         default=None,
         help="The maximum context length of the model for the Longbench dataset. Requests longer than the context length will be dropped.",
     )
+    
     # For Mixed-len dataset
     parser.add_argument(
         "--long_request_min_context",
@@ -3130,6 +3144,7 @@ if __name__ == "__main__":
         default=None,
         help="The number of short requests within a period",
     )
+    
     # For InfiniteBench dataset
     parser.add_argument(
         "--infini-min-context",
@@ -3144,6 +3159,11 @@ if __name__ == "__main__":
         help="The maximum context length of the model for the InfiniteBench dataset. Requests longer than the context length will be dropped.",
     )
 
+    parser.add_argument(
+        "--sort-len",
+        action='store_true',
+        help="To return the filtered_dataset in ascending order when set True.",
+    )
     ############################
     parser.add_argument(
         "--sharegpt-context-len",
